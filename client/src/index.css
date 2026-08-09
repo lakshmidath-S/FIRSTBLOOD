@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  @apply bg-ink-50 text-ink-900 font-sans antialiased;
+  margin: 0;
+}
+
+::selection {
+  @apply bg-blood-200;
+}
+
+/* Slim, unobtrusive scrollbars — most of the app lives in scrollable cards */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-ink-300 rounded-full;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-ink-400;
+}

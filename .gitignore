@@ -1,0 +1,22 @@
+# Root safety net — nested .gitignore files in server/ and client/ also
+# apply, but secrets must never depend on a single layer of defense.
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+dist-ssr/
+build/
+*.log
+.DS_Store
+
+# Generated credential dumps. The seeded test logins are throwaway, but a file
+# full of email/password pairs still doesn't belong in version control — and
+# it's regenerable from prisma/test-data.json anyway.
+*_Credentials.pdf
+FIRSTBLOOD_Test_Credentials.pdf
+
+# Firebase credentials for the mobile app
+**/google-services.json
+**/GoogleService-Info.plist
+**/serviceAccountKey*.json

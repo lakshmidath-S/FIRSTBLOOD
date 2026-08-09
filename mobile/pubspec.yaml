@@ -1,0 +1,42 @@
+name: firstblood
+description: FIRSTBLOOD — blood donation network mobile app (Donor, Hospital, Admin, and no-account recipients).
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  # Dart 3.6 / Flutter 3.27+ — needed for Color.withValues(), used throughout
+  # the UI kit instead of the now-deprecated withOpacity().
+  sdk: ">=3.6.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # --- Networking / state ---
+  dio: ^5.7.0                     # REST client with a JWT interceptor
+  socket_io_client: ^2.0.3+1      # same realtime layer the web client uses
+  provider: ^6.1.2                # simple ChangeNotifier state (mirrors zustand)
+  shared_preferences: ^2.3.2      # persists the auth session across launches
+
+  # --- Device capabilities ---
+  geolocator: ^13.0.1             # GPS for donor location + ~1/min en-route pings
+  permission_handler: ^11.3.1
+
+  # --- Notifications (the reason this app exists) ---
+  firebase_core: ^3.6.0
+  firebase_messaging: ^15.1.3     # push that reaches a closed app
+  flutter_local_notifications: ^17.2.3  # renders socket + foreground-push alerts
+
+  # --- UI ---
+  flutter_map: ^7.0.2             # OpenStreetMap tiles, same as Leaflet on web
+  latlong2: ^0.9.1
+  fl_chart: ^0.69.0               # admin analytics charts (recharts equivalent)
+  intl: ^0.19.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

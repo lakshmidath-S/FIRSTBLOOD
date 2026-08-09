@@ -1,0 +1,295 @@
+// FIRSTBLOOD — Prisma schema
+// Distance calculations use the Postgres `cube` + `earthdistance` extensions,
+// enabled via the raw-SQL migration in prisma/migrations/0_extensions (added after `prisma migrate dev`).
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [cube, earthdistance]
+}
+
+enum UserRole {
+  ADMIN
+  DONOR
+  HOSPITAL
+}
+
+enum RequestStatus {
+  OPEN
+  PARTIAL
+  FULFILLED
+  CANCELLED
+  EXPIRED
+}
+
+enum Urgency {
+  CRITICAL
+  HIGH
+  NORMAL
+}
+
+enum ResponseStatus {
+  ALERTED
+  ACCEPTED
+  DECLINED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+model User {
+  id           String   @id @default(uuid())
+  role         UserRole
+  email        String?  @unique
+  passwordHash String?
+  phone        String?
+  isActive     Boolean  @default(true)
+  isBanned     Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  donorProfile    DonorProfile?
+  hospitalProfile HospitalProfile?
+  adminProfile    AdminProfile?
+
+  requestsCreated     BloodRequest[]        @relation("RequestCreator")
+  notifications       Notification[]
+  devices             Device[]
+  auditLogsAsActor    AuditLog[]
+  verifiedTransactions DonationTransaction[] @relation("VerifiedBy")
+
+  @@index([role])
+}
+
+model AdminProfile {
+  userId String @id
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name   String
+}
+
+model DonorProfile {
+  userId            String    @id
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fullName          String
+  bloodGroup        String
+  dob               DateTime?
+  gender            String?
+  lastDonatedAt     DateTime?
+  isAvailable       Boolean   @default(true)
+  lat               Float?
+  lng               Float?
+  city              String?
+  locationUpdatedAt DateTime?
+  // Deliberate denormalisation: both are incrementally maintained counters,
+  // not derivable-on-read conveniences. They're read on the hot matching /
+  // flagging paths and keeping them avoids aggregating the whole response
+  // history on every query.
+  //
+  // (Removed alongside these: `firstOptedAt`, which was always identical to
+  // User.createdAt, and `lastResponseAt`, which duplicated
+  // RequestResponse.respondedAt and — worse — was read by the flagged-donor
+  // query but never actually written, so every donor looked permanently
+  // inactive. Both are now derived from the real source of truth.)
+  totalDonations    Int       @default(0)
+  noShowCount       Int       @default(0)
+
+  responses           RequestResponse[]
+  donationTransactions DonationTransaction[]
+  locationPings       DonorLocationPing[]
+
+  @@index([bloodGroup])
+  @@index([isAvailable])
+  @@index([city])
+}
+
+model HospitalProfile {
+  userId         String  @id
+  user           User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  hospitalName   String
+  registrationNo String?
+  address        String?
+  // The hospital's own fixed location — set at registration (see
+  // auth.service.js) and reused for every request it creates, so it never
+  // has to be re-entered per request. `city` doubles as the target for
+  // "broadcast to everyone in my city" requests (see requests.routes.js).
+  city           String?
+  lat            Float?
+  lng            Float?
+  verified       Boolean @default(false)
+
+  transactions DonationTransaction[]
+
+  @@index([city])
+}
+
+model PublicOtpSession {
+  id        String   @id @default(uuid())
+  phone     String
+  otpHash   String
+  expiresAt DateTime
+  verified  Boolean  @default(false)
+  // A 6-digit code inside a 5-minute window is only ~10^6 guesses, which is
+  // minutes of brute force with concurrent requests. Attempts are counted and
+  // the session is burned after a handful of misses.
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  requests BloodRequest[]
+
+  @@index([phone])
+  @@index([phone, createdAt])
+}
+
+model BloodRequest {
+  id                    String        @id @default(uuid())
+  createdByUserId       String?
+  createdByUser         User?         @relation("RequestCreator", fields: [createdByUserId], references: [id])
+  createdByPublicId     String?
+  createdByPublic       PublicOtpSession? @relation(fields: [createdByPublicId], references: [id])
+
+  bloodGroup     String
+  unitsNeeded    Int
+  // Maintained by an atomic conditional UPDATE so concurrent accepts can
+  // never over-claim — this one is load-bearing for correctness, not just speed.
+  unitsClaimed   Int           @default(0)
+  urgency        Urgency       @default(NORMAL)
+  status         RequestStatus @default(OPEN)
+  lat            Float
+  lng            Float
+  notes          String?
+  // Two mutually exclusive broadcast scopes: leave `city` null to match the
+  // nearest eligible donors within `searchRadiusKm` of (lat, lng); set
+  // `city` to instead match every eligible donor registered in that city
+  // (see src/modules/requests/matching.js).
+  searchRadiusKm Int           @default(10)
+  city           String?
+  createdAt      DateTime      @default(now())
+  expiresAt      DateTime?
+
+  responses     RequestResponse[]
+  transactions  DonationTransaction[]
+  locationPings DonorLocationPing[]
+  notifications Notification[]
+
+  @@index([status, bloodGroup])
+}
+
+model RequestResponse {
+  id           String         @id @default(uuid())
+  requestId    String
+  request      BloodRequest   @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  donorId      String
+  donor        DonorProfile   @relation(fields: [donorId], references: [userId], onDelete: Cascade)
+  status       ResponseStatus @default(ALERTED)
+  distanceKm   Float?
+  alertedAt    DateTime       @default(now())
+  respondedAt  DateTime?
+  // Derived from distanceKm, but stored as a snapshot taken at accept time —
+  // a cheap precomputation on a value that's read on every dashboard render.
+  etaMinutes   Int?
+
+  @@unique([requestId, donorId])
+  @@index([requestId, status])
+  // Supports "has this donor responded recently", which replaced the
+  // never-written DonorProfile.lastResponseAt column.
+  @@index([donorId, respondedAt])
+}
+
+// One row per confirmed donation. Deliberately minimal: a cancelled or
+// no-show donation produces no row at all (that lives on RequestResponse.status),
+// so there's no transaction status to track, and one donor donating once means
+// there's no unit count to store either — the request's `unitsClaimed` is where
+// units are counted.
+model DonationTransaction {
+  id           String             @id @default(uuid())
+  requestId    String
+  request      BloodRequest       @relation(fields: [requestId], references: [id])
+  donorId      String
+  donor        DonorProfile       @relation(fields: [donorId], references: [userId])
+  // Denormalised from request.createdByUserId so a hospital's donation
+  // history is a single indexed lookup rather than a join through requests.
+  // Null for donations against an independent receiver's request.
+  hospitalId   String?
+  hospital     HospitalProfile?   @relation(fields: [hospitalId], references: [userId])
+  // Null when confirmed by a public/OTP requester, who has no User row.
+  verifiedById String?
+  verifiedBy   User?              @relation("VerifiedBy", fields: [verifiedById], references: [id])
+  donatedAt    DateTime           @default(now())
+
+  @@index([donorId])
+  @@index([hospitalId])
+}
+
+model DonorLocationPing {
+  id         String       @id @default(uuid())
+  requestId  String
+  request    BloodRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  donorId    String
+  donor      DonorProfile @relation(fields: [donorId], references: [userId], onDelete: Cascade)
+  lat        Float
+  lng        Float
+  recordedAt DateTime     @default(now())
+
+  @@index([requestId, donorId, recordedAt])
+}
+
+// One installed copy of the mobile app.
+//
+// Two separate concerns are stored here on purpose:
+//   - `installId` proves the app is installed. The app generates it locally
+//     on first launch and it never changes, so it works even when Firebase
+//     isn't configured. This is what donor eligibility is checked against.
+//   - `pushToken` is the FCM token, which only exists once Firebase is set
+//     up and which FCM rotates freely. Nullable, because "has the app" and
+//     "can receive push right now" are genuinely different states.
+//
+// Keeping eligibility on installId rather than pushToken matters: otherwise a
+// donor who revoked notification permission would silently drop out of every
+// search, which is a confusing failure nobody would be able to diagnose.
+model Device {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  installId  String   @unique
+  pushToken  String?  @unique
+  platform   String? // "android" | "ios"
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// A notification is stored once and fanned out over every available transport
+// (socket + FCM push) — so there's no single "channel" to record. The old
+// column always held the same value and was never read.
+model Notification {
+  id        String        @id @default(uuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  requestId String?
+  request   BloodRequest? @relation(fields: [requestId], references: [id])
+  type      String
+  title     String
+  body      String
+  readAt    DateTime?
+  createdAt DateTime      @default(now())
+
+  @@index([userId, readAt])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id])
+  action     String
+  entityType String
+  entityId   String
+  meta       Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+}
